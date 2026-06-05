@@ -56,6 +56,16 @@ def in_scope(cwd, roots):
 
 
 def derive_repo(cwd):
+    # Report the canonical repo name even from a linked worktree, where
+    # --show-toplevel points at the worktree dir. --git-common-dir points at
+    # the MAIN repo's .git; its parent is the repo root.
+    cgd = git(cwd, "rev-parse", "--git-common-dir")
+    if cgd:
+        cgd = cgd if os.path.isabs(cgd) else os.path.join(cwd, cgd)
+        root = os.path.dirname(os.path.realpath(cgd))
+        name = os.path.basename(root)
+        if name and name != ".git":
+            return name
     top = git(cwd, "rev-parse", "--show-toplevel")
     return os.path.basename(top) if top else (os.path.basename(cwd.rstrip("/")) or "?")
 
