@@ -1,0 +1,5 @@
+# nothing machine-specific lives in this repo, but just in case:
+*.bak
+*.tmp
+.DS_Store
+__pycache__/

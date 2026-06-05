@@ -1,0 +1,33 @@
+filters:
+  and:
+    - status == "active"
+    - file.folder == "__BOARD_FOLDER__"
+    - 'not file.name.startsWith("_")'
+formulas:
+  idleMin: "round((now() - file.mtime) / 60000)"
+properties:
+  session:
+    displayName: "Session"
+  repo:
+    displayName: "Repo"
+  worktree:
+    displayName: "Worktree"
+  task:
+    displayName: "Working on"
+  claims:
+    displayName: "Files claimed"
+  updated:
+    displayName: "Updated"
+  formula.idleMin:
+    displayName: "Idle (min)"
+views:
+  - type: table
+    name: "Active agents"
+    order:
+      - session
+      - repo
+      - worktree
+      - task
+      - claims
+      - updated
+      - formula.idleMin

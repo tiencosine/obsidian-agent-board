@@ -1,0 +1,216 @@
+#!/usr/bin/env python3
+"""agent-board — a running Claude Code session updates its own board note.
+
+Resolves "my note" from the cwd->session pointer written by agent-board-hook,
+so just run it from inside your session's working directory.
+
+  agent-board task "<one line>"          set what you're doing
+  agent-board claim <path> [<path>...]   stake files you'll edit (warns on conflict)
+  agent-board release <path> [...]       drop claims
+  agent-board note "<text>"              append a timestamped log line to your note
+  agent-board check <path>               who else (live) claims this path?
+  agent-board who                        text view of all active sessions
+  agent-board where                      print your note path + the board dir
+
+Config: ~/.config/obsidian-agent-board/config.json  (board_dir, roots).
+Env overrides: AGENT_BOARD_DIR, AGENT_BOARD_ROOTS (colon-separated)."""
+import sys, os, json, time, hashlib, glob
+
+CFG_DIR = os.path.expanduser("~/.config/obsidian-agent-board")
+POINTER_DIR = os.path.join(CFG_DIR, "pointers")
+ORDER = ["status", "session", "session_id", "repo", "worktree", "branch",
+         "task", "claims", "started", "updated"]
+
+
+def load_config():
+    cfg = {}
+    try:
+        with open(os.path.join(CFG_DIR, "config.json")) as f:
+            cfg = json.load(f)
+    except Exception:
+        cfg = {}
+    board = (os.environ.get("AGENT_BOARD_DIR") or cfg.get("board_dir")
+             or os.path.expanduser("~/agent-board/sessions"))
+    return os.path.expanduser(board)
+
+
+BOARD = load_config()
+
+
+def now_iso():
+    return time.strftime("%Y-%m-%dT%H:%M:%S")
+
+
+def read_note(path):
+    with open(path) as f:
+        text = f.read()
+    parts = text.split("---\n")
+    fm = {}
+    if len(parts) >= 3:
+        for line in parts[1].splitlines():
+            if ":" not in line:
+                continue
+            k, v = line.split(":", 1)
+            k, v = k.strip(), v.strip()
+            if not k:
+                continue
+            if k == "claims":
+                try: fm[k] = json.loads(v)
+                except Exception: fm[k] = []
+            elif k == "task":
+                try: fm[k] = json.loads(v)
+                except Exception: fm[k] = v
+            else:
+                fm[k] = v
+        body = "---\n".join(parts[2:])
+    else:
+        body = ""
+    return fm, body
+
+
+def write_note(path, fm, body=""):
+    lines = ["---"]
+    for k in ORDER:
+        if k not in fm:
+            continue
+        v = fm[k]
+        if k == "claims":
+            v = json.dumps(v, ensure_ascii=False)
+        elif k == "task":
+            v = json.dumps(v if v else "", ensure_ascii=False)
+        lines.append(f"{k}: {v}")
+    out = "\n".join(lines) + "\n---\n" + (body or "")
+    tmp = path + ".tmp"
+    with open(tmp, "w") as f:
+        f.write(out)
+    os.replace(tmp, path)
+
+
+def load_active(exclude_sid=None):
+    out = []
+    for p in glob.glob(os.path.join(BOARD, "*.md")):
+        if os.path.basename(p).startswith("_"):
+            continue
+        try:
+            fm, _ = read_note(p)
+        except Exception:
+            continue
+        if fm.get("status") != "active":
+            continue
+        if exclude_sid and fm.get("session_id") == exclude_sid:
+            continue
+        out.append(fm)
+    return out
+
+
+def my_note():
+    h = hashlib.sha1(os.path.realpath(os.getcwd()).encode()).hexdigest()
+    ptr = os.path.join(POINTER_DIR, h)
+    if not os.path.exists(ptr):
+        sys.exit("agent-board: no session note for this cwd. Is the hook installed, "
+                 "and is this dir in scope (a git repo, or under a configured root)?")
+    with open(ptr) as f:
+        sid = f.read().strip()
+    note = os.path.join(BOARD, f"{sid}.md")
+    if not os.path.exists(note):
+        sys.exit(f"agent-board: pointer found but note missing: {note}")
+    return sid, note
+
+
+def cmd_task(args):
+    _, note = my_note()
+    fm, body = read_note(note)
+    fm["task"] = " ".join(args)
+    fm["updated"] = now_iso()
+    write_note(note, fm, body)
+    print(f"task set: {fm['task']}")
+
+
+def cmd_claim(args):
+    sid, note = my_note()
+    fm, body = read_note(note)
+    claims = fm.get("claims", [])
+    for a in args:
+        if a not in claims:
+            claims.append(a)
+    fm["claims"] = claims
+    fm["updated"] = now_iso()
+    write_note(note, fm, body)
+    others = load_active(exclude_sid=sid)
+    for a in args:
+        for h in others:
+            if any(a == c or a in c or c in a for c in h.get("claims", [])):
+                print(f"⚠️  {a} ALSO claimed by {h.get('session')} "
+                      f"({h.get('repo')}/{h.get('worktree')}): {h.get('task')}")
+    print(f"claims: {fm['claims']}")
+
+
+def cmd_release(args):
+    _, note = my_note()
+    fm, body = read_note(note)
+    fm["claims"] = [c for c in fm.get("claims", []) if c not in args]
+    fm["updated"] = now_iso()
+    write_note(note, fm, body)
+    print(f"claims: {fm['claims']}")
+
+
+def cmd_note(args):
+    _, note = my_note()
+    fm, body = read_note(note)
+    body = (body or "").rstrip() + f"\n- {now_iso()} {' '.join(args)}\n"
+    fm["updated"] = now_iso()
+    write_note(note, fm, body)
+    print("logged.")
+
+
+def cmd_check(args):
+    if not args:
+        sys.exit("usage: agent-board check <path>")
+    target = args[0]
+    sid, _ = my_note()
+    hits = []
+    for o in load_active(exclude_sid=sid):
+        for c in o.get("claims", []):
+            if target == c or target in c or c in target \
+                    or os.path.basename(c) == os.path.basename(target):
+                hits.append((o, c))
+    if not hits:
+        print(f"clear: no live session claims {target}")
+        return
+    for o, c in hits:
+        print(f"⚠️  {target} claimed via '{c}' by {o.get('session')} "
+              f"({o.get('repo')}/{o.get('worktree')}): {o.get('task')}")
+
+
+def cmd_who(_args):
+    rows = load_active()
+    if not rows:
+        print("no active sessions.")
+        return
+    for o in sorted(rows, key=lambda r: (r.get("repo", ""), r.get("worktree", ""))):
+        cl = ", ".join(os.path.basename(c) for c in o.get("claims", [])) or "-"
+        print(f"[{o.get('repo')}/{o.get('worktree')}] {o.get('session')}: "
+              f"{o.get('task')}  | claims: {cl}")
+
+
+def cmd_where(_args):
+    print("board dir:", BOARD)
+    try:
+        _, note = my_note()
+        print("your note:", note)
+    except SystemExit as e:
+        print(e)
+
+
+CMDS = {"task": cmd_task, "claim": cmd_claim, "release": cmd_release,
+        "note": cmd_note, "check": cmd_check, "who": cmd_who, "where": cmd_where}
+
+
+def main():
+    if len(sys.argv) < 2 or sys.argv[1] not in CMDS:
+        sys.exit(__doc__)
+    CMDS[sys.argv[1]](sys.argv[2:])
+
+
+if __name__ == "__main__":
+    main()

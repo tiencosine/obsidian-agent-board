@@ -1,0 +1,257 @@
+#!/usr/bin/env python3
+"""obsidian-agent-board: per-session presence + file-claim board for concurrent
+Claude Code sessions.
+
+Wired to four hook events and reads the hook JSON payload on stdin:
+  SessionStart  -> create/refresh this session's note, inject usage into context
+  Stop          -> heartbeat (bump `updated` every turn => liveness)
+  SessionEnd    -> mark the note `status: done`
+  PreToolUse    -> (Edit/Write/MultiEdit) warn if another live session claims the file
+
+Safe by design: any error => exit 0, so it can NEVER block a tool call.
+Config: ~/.config/obsidian-agent-board/config.json  (board_dir, roots).
+Env overrides: AGENT_BOARD_DIR, AGENT_BOARD_ROOTS (colon-separated)."""
+import sys, os, json, time, hashlib, subprocess, glob
+
+CFG_DIR = os.path.expanduser("~/.config/obsidian-agent-board")
+POINTER_DIR = os.path.join(CFG_DIR, "pointers")
+ORDER = ["status", "session", "session_id", "repo", "worktree", "branch",
+         "task", "claims", "started", "updated"]
+
+
+def load_config():
+    cfg = {}
+    try:
+        with open(os.path.join(CFG_DIR, "config.json")) as f:
+            cfg = json.load(f)
+    except Exception:
+        cfg = {}
+    board = (os.environ.get("AGENT_BOARD_DIR") or cfg.get("board_dir")
+             or os.path.expanduser("~/agent-board/sessions"))
+    env_roots = os.environ.get("AGENT_BOARD_ROOTS")
+    roots = ([r for r in env_roots.split(":") if r] if env_roots
+             else (cfg.get("roots") or []))
+    return os.path.expanduser(board), roots
+
+
+def now_iso():
+    return time.strftime("%Y-%m-%dT%H:%M:%S")
+
+
+def git(cwd, *args):
+    try:
+        return subprocess.run(["git", "-C", cwd, *args], capture_output=True,
+                              text=True, timeout=2).stdout.strip()
+    except Exception:
+        return ""
+
+
+def is_git(cwd):
+    return git(cwd, "rev-parse", "--is-inside-work-tree") == "true"
+
+
+def in_scope(cwd, roots):
+    # With roots configured: substring match. Without: any git repo.
+    return any(r in cwd for r in roots) if roots else is_git(cwd)
+
+
+def derive_repo(cwd):
+    top = git(cwd, "rev-parse", "--show-toplevel")
+    return os.path.basename(top) if top else (os.path.basename(cwd.rstrip("/")) or "?")
+
+
+def derive_worktree(cwd):
+    gd = git(cwd, "rev-parse", "--git-dir")
+    cgd = git(cwd, "rev-parse", "--git-common-dir")
+    if gd and cgd and os.path.realpath(gd) != os.path.realpath(cgd):
+        top = git(cwd, "rev-parse", "--show-toplevel")
+        return os.path.basename(top) if top else "worktree"
+    return "main"
+
+
+def pointer_path(cwd):
+    h = hashlib.sha1(os.path.realpath(cwd).encode()).hexdigest()
+    return os.path.join(POINTER_DIR, h)
+
+
+def read_note(path):
+    with open(path) as f:
+        text = f.read()
+    parts = text.split("---\n")
+    fm = {}
+    if len(parts) >= 3:
+        for line in parts[1].splitlines():
+            if ":" not in line:
+                continue
+            k, v = line.split(":", 1)
+            k, v = k.strip(), v.strip()
+            if not k:
+                continue
+            if k == "claims":
+                try: fm[k] = json.loads(v)
+                except Exception: fm[k] = []
+            elif k == "task":
+                try: fm[k] = json.loads(v)
+                except Exception: fm[k] = v
+            else:
+                fm[k] = v
+        body = "---\n".join(parts[2:])
+    else:
+        body = ""
+    return fm, body
+
+
+def write_note(path, fm, body=""):
+    lines = ["---"]
+    for k in ORDER:
+        if k not in fm:
+            continue
+        v = fm[k]
+        if k == "claims":
+            v = json.dumps(v, ensure_ascii=False)
+        elif k == "task":
+            v = json.dumps(v if v else "", ensure_ascii=False)
+        lines.append(f"{k}: {v}")
+    out = "\n".join(lines) + "\n---\n" + (body or "")
+    tmp = path + ".tmp"
+    with open(tmp, "w") as f:
+        f.write(out)
+    os.replace(tmp, path)
+
+
+def load_active(board, exclude_sid=None):
+    out = []
+    for p in glob.glob(os.path.join(board, "*.md")):
+        if os.path.basename(p).startswith("_"):
+            continue
+        try:
+            fm, _ = read_note(p)
+        except Exception:
+            continue
+        if fm.get("status") != "active":
+            continue
+        if exclude_sid and fm.get("session_id") == exclude_sid:
+            continue
+        out.append(fm)
+    return out
+
+
+def prune_done(board, max_age_days=2):
+    cutoff = time.time() - max_age_days * 86400
+    for p in glob.glob(os.path.join(board, "*.md")):
+        if os.path.basename(p).startswith("_"):
+            continue
+        try:
+            fm, _ = read_note(p)
+            if fm.get("status") == "done" and os.path.getmtime(p) < cutoff:
+                os.remove(p)
+        except Exception:
+            pass
+
+
+def handle(payload):
+    event = payload.get("hook_event_name", "")
+    sid = payload.get("session_id", "")
+    cwd = payload.get("cwd", os.getcwd())
+    board, roots = load_config()
+    if not in_scope(cwd, roots):
+        return
+    os.makedirs(board, exist_ok=True)
+    os.makedirs(POINTER_DIR, exist_ok=True)
+
+    if event == "PreToolUse":
+        if payload.get("tool_name", "") not in ("Edit", "Write", "MultiEdit"):
+            return
+        fp = (payload.get("tool_input") or {}).get("file_path", "")
+        if not fp:
+            return
+        mysid = None
+        try:
+            with open(pointer_path(cwd)) as f:
+                mysid = f.read().strip()
+        except Exception:
+            pass
+        hits = []
+        for fm in load_active(board, exclude_sid=mysid):
+            for c in fm.get("claims", []):
+                if c and (c in fp or fp in c
+                          or os.path.basename(c) == os.path.basename(fp)):
+                    hits.append(fm)
+                    break
+        if hits:
+            who = "; ".join(f"{h.get('session')} ({h.get('repo')}/"
+                            f"{h.get('worktree')}): {h.get('task')}" for h in hits)
+            msg = (f"⚠️ agent-board: {os.path.basename(fp)} is claimed by "
+                   f"{who} — coordinate or run `agent-board check` before editing.")
+            print(json.dumps({"hookSpecificOutput": {
+                "hookEventName": "PreToolUse", "additionalContext": msg}}))
+        return
+
+    if not sid:
+        return
+    note = os.path.join(board, f"{sid}.md")
+
+    if event == "SessionStart":
+        prune_done(board)
+        if os.path.exists(note):
+            fm, body = read_note(note)
+            fm["status"] = "active"
+            fm["updated"] = now_iso()
+            fm["branch"] = git(cwd, "rev-parse", "--abbrev-ref", "HEAD") or fm.get("branch", "")
+        else:
+            fm = {
+                "status": "active",
+                "session": sid[:8],
+                "session_id": sid,
+                "repo": derive_repo(cwd),
+                "worktree": derive_worktree(cwd),
+                "branch": git(cwd, "rev-parse", "--abbrev-ref", "HEAD"),
+                "task": "(starting…)",
+                "claims": [],
+                "started": now_iso(),
+                "updated": now_iso(),
+            }
+            body = ""
+        write_note(note, fm, body)
+        with open(pointer_path(cwd), "w") as f:
+            f.write(sid)
+        print(
+            f"LIVE AGENT BOARD active. Your note: {note}\n"
+            "- agent-board task \"<what you're doing>\"\n"
+            "- agent-board check <path>      (before editing a shared file)\n"
+            "- agent-board claim <path...>   (release when done)\n"
+            "- agent-board who               (see everyone live)\n"
+            "Presence + heartbeat are automatic; only task/claims need you."
+        )
+    elif event == "Stop":
+        if os.path.exists(note):
+            fm, body = read_note(note)
+            fm["status"] = "active"
+            fm["updated"] = now_iso()
+            write_note(note, fm, body)
+    elif event == "SessionEnd":
+        if os.path.exists(note):
+            fm, body = read_note(note)
+            fm["status"] = "done"
+            fm["updated"] = now_iso()
+            write_note(note, fm, body)
+        try:
+            os.remove(pointer_path(cwd))
+        except OSError:
+            pass
+
+
+def main():
+    try:
+        payload = json.load(sys.stdin)
+    except Exception:
+        return 0
+    try:
+        handle(payload)
+    except Exception:
+        return 0  # never block a tool call
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
