@@ -51,7 +51,7 @@ The guardrail closes the gap: even if an agent forgets to run `check`, it gets a
 ## Install
 
 ```bash
-git clone https://github.com/<you>/obsidian-agent-board.git
+git clone https://github.com/tiencosine/obsidian-agent-board.git
 cd obsidian-agent-board
 ./install.sh
 ```

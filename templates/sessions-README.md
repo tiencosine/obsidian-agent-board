@@ -8,4 +8,4 @@ maintained automatically by `~/.claude/hooks/agent-board-hook`. The
 - `status: done` notes drop off the board automatically and are pruned after 2 days.
 - Don't edit these by hand while sessions are live — use the `agent-board` CLI.
 
-Part of **obsidian-agent-board**: https://github.com/<you>/obsidian-agent-board
+Part of **obsidian-agent-board**: https://github.com/tiencosine/obsidian-agent-board
