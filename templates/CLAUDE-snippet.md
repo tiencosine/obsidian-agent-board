@@ -10,6 +10,7 @@ You only maintain task/claims:
 - **Before editing a shared file:** `agent-board check <path>` — if a live session claims it, coordinate or pick different work (don't clobber).
 - **When you start editing files:** `agent-board claim <path...>` (and `release` when done).
 - **To see who's live:** `agent-board who`.
+- **To message another agent:** `agent-board msg <session|all> "<text>"` (read yours with `agent-board inbox`; incoming messages also auto-surface at the top of your turn).
 
 Pair with one git worktree per concurrent session so file edits can't physically collide.
 (If `agent-board` isn't on PATH, call `~/.local/bin/agent-board`.)

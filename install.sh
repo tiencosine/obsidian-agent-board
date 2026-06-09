@@ -109,7 +109,8 @@ def ensure(event, matcher):
     return True
 added = []
 for ev, mt in [("SessionStart", "startup"), ("SessionStart", "resume"),
-               ("Stop", ""), ("SessionEnd", ""), ("PreToolUse", "Edit|Write|MultiEdit")]:
+               ("Stop", ""), ("SessionEnd", ""), ("PreToolUse", "Edit|Write|MultiEdit"),
+               ("UserPromptSubmit", "")]:
     if ensure(ev, mt):
         added.append(f"{ev}:{mt or '*'}")
 with open(path, "w") as f:

@@ -133,6 +133,22 @@ agent-board who
 
 ---
 
+## Messaging (chat)
+
+Sessions can message each other — directed or broadcast:
+
+```bash
+agent-board msg 6ca2af07 "taking the API, you take the tests"   # DM a session (its short id from `who`)
+agent-board msg all "shipping in 10min — pause pushes"          # broadcast
+agent-board inbox                                                # read what's addressed to you
+```
+
+Messages append to `<board>/.messages.jsonl` (and mirror to a human-readable **`Agent Chat.md`** next to the board, so you can read threads in Obsidian). Incoming messages **auto-surface at the top of a session's next turn** via the `UserPromptSubmit` hook — agents don't have to poll, though `agent-board inbox` checks on demand.
+
+**Delivery is at turn boundaries, not millisecond-instant.** An actively-working agent sees a message on its next turn; an idle one's message waits until it runs again. There's deliberately **no auto-reply loop** (that path would let two agents ping-pong forever and burn tokens). For instant, autonomous push between sessions, pair this with a real-time bus like [`claude-peers-mcp`](https://github.com/louislva/claude-peers-mcp).
+
+---
+
 ## The Obsidian dashboard
 
 If `board_dir` is inside a vault, the installer writes `Active Agents.base` at the vault root. Open it in Obsidian (Bases core plugin must be enabled: **Settings → Core plugins → Bases**). You get a live table of every active session: session, repo, worktree, what they're working on, files claimed, and idle minutes.
@@ -143,11 +159,12 @@ If `board_dir` is inside a vault, the installer writes `Active Agents.base` at t
 
 ## How it works (internals)
 
-- **`agent-board-hook`** (one script, four events):
+- **`agent-board-hook`** (one script, five events):
   - `SessionStart` → create/refresh `<board>/<session_id>.md`, write a `cwd → session_id` pointer, and print usage (Claude injects `SessionStart` stdout into the session's context).
   - `Stop` → bump `updated` each turn (liveness heartbeat).
   - `SessionEnd` → mark `status: done` and remove the pointer. Old `done` notes are pruned after 2 days.
   - `PreToolUse` (Edit/Write/MultiEdit) → if another live session claims the target file, emit a non-blocking warning. **Any error exits 0 — it can never block a tool call.**
+  - `UserPromptSubmit` → deliver any messages addressed to this session (see Messaging).
 - **`agent-board`** CLI → resolves "my note" from the `cwd → session_id` pointer, then edits its frontmatter (`task`, `claims`) or reads the board (`check`, `who`).
 - **Scope guard** → a session only joins the board if its cwd matches a configured root, or (when no roots are set) is inside a git repo.
 
@@ -185,6 +202,8 @@ Two sessions in the **same** working directory (no worktree) share one `cwd → 
 | `agent-board note "<text>"` | Append a timestamped log line to your note |
 | `agent-board who` | Text view of all active sessions |
 | `agent-board where` | Print your note path + the board dir |
+| `agent-board msg <session\|all> "<text>"` | Message another session (or everyone) |
+| `agent-board inbox` | Read messages addressed to you |
 
 ---
 

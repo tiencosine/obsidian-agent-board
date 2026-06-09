@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
-"""obsidian-agent-board: per-session presence + file-claim board for concurrent
-Claude Code sessions.
+"""obsidian-agent-board: per-session presence + file-claim board + mailbox for
+concurrent Claude Code sessions.
 
-Wired to four hook events and reads the hook JSON payload on stdin:
-  SessionStart  -> create/refresh this session's note, inject usage into context
-  Stop          -> heartbeat (bump `updated` every turn => liveness)
-  SessionEnd    -> mark the note `status: done`
-  PreToolUse    -> (Edit/Write/MultiEdit) warn if another live session claims the file
+Wired to five hook events and reads the hook JSON payload on stdin:
+  SessionStart    -> create/refresh this session's note, inject usage into context
+  Stop            -> heartbeat (bump `updated` every turn => liveness)
+  SessionEnd      -> mark the note `status: done`
+  PreToolUse      -> (Edit/Write/MultiEdit) warn if another live session claims the file
+  UserPromptSubmit-> deliver any messages addressed to this session (from `agent-board msg`)
 
 Safe by design: any error => exit 0, so it can NEVER block a tool call.
 Config: ~/.config/obsidian-agent-board/config.json  (board_dir, roots).
@@ -15,6 +16,7 @@ import sys, os, json, time, hashlib, subprocess, glob
 
 CFG_DIR = os.path.expanduser("~/.config/obsidian-agent-board")
 POINTER_DIR = os.path.join(CFG_DIR, "pointers")
+CURSOR_DIR = os.path.join(CFG_DIR, "inbox")
 ORDER = ["status", "session", "session_id", "repo", "worktree", "branch",
          "task", "claims", "started", "updated"]
 
@@ -159,6 +161,38 @@ def prune_done(board, max_age_days=2):
             pass
 
 
+def read_messages(board):
+    out = []
+    try:
+        with open(os.path.join(board, ".messages.jsonl")) as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    out.append(json.loads(line))
+                except Exception:
+                    pass
+    except FileNotFoundError:
+        pass
+    return out
+
+
+def deliver_for(board, sid, sid_name):
+    msgs = read_messages(board)
+    cp = os.path.join(CURSOR_DIR, sid)
+    try:
+        cur = int(open(cp).read().strip())
+    except Exception:
+        cur = 0
+    mine = [m for m in msgs[cur:] if m.get("from") != sid
+            and m.get("to") in (sid, sid_name, "all", "@all", "everyone")]
+    os.makedirs(CURSOR_DIR, exist_ok=True)
+    with open(cp, "w") as f:
+        f.write(str(len(msgs)))
+    return mine
+
+
 def handle(payload):
     event = payload.get("hook_event_name", "")
     sid = payload.get("session_id", "")
@@ -201,6 +235,22 @@ def handle(payload):
         return
     note = os.path.join(board, f"{sid}.md")
 
+    if event == "UserPromptSubmit":
+        name = sid[:8]
+        if os.path.exists(note):
+            try:
+                fm, _ = read_note(note)
+                name = fm.get("session", name)
+            except Exception:
+                pass
+        mine = deliver_for(board, sid, name)
+        if mine:
+            lines = "\n".join(f"- {m.get('from_name')} → {m.get('to')}: {m.get('text')}"
+                              for m in mine)
+            print(f"📬 agent-board: {len(mine)} new message(s) from other sessions:\n"
+                  f"{lines}\n(reply with: agent-board msg <session|all> \"...\")")
+        return
+
     if event == "SessionStart":
         prune_done(board)
         if os.path.exists(note):
@@ -231,7 +281,8 @@ def handle(payload):
             "- agent-board check <path>      (before editing a shared file)\n"
             "- agent-board claim <path...>   (release when done)\n"
             "- agent-board who               (see everyone live)\n"
-            "Presence + heartbeat are automatic; only task/claims need you."
+            "- agent-board msg <session|all> \"...\"   /   agent-board inbox\n"
+            "Presence + heartbeat are automatic; only task/claims/msgs need you."
         )
     elif event == "Stop":
         if os.path.exists(note):
