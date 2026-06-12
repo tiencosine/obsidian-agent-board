@@ -148,15 +148,22 @@ def load_active(board, exclude_sid=None):
     return out
 
 
-def prune_done(board, max_age_days=2):
-    cutoff = time.time() - max_age_days * 86400
+def prune_done(board, max_age_days=2, stale_active_hours=12):
+    now = time.time()
     for p in glob.glob(os.path.join(board, "*.md")):
         if os.path.basename(p).startswith("_"):
             continue
         try:
-            fm, _ = read_note(p)
-            if fm.get("status") == "done" and os.path.getmtime(p) < cutoff:
+            fm, body = read_note(p)
+            st = fm.get("status")
+            age = now - os.path.getmtime(p)
+            if st == "done" and age > max_age_days * 86400:
                 os.remove(p)
+            elif st == "active" and age > stale_active_hours * 3600:
+                # session died without SessionEnd; a still-live one revives on its next Stop heartbeat
+                fm["status"] = "done"
+                fm["updated"] = now_iso()
+                write_note(p, fm, body)
         except Exception:
             pass
 

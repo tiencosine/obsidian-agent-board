@@ -157,12 +157,24 @@ If `board_dir` is inside a vault, the installer writes `Active Agents.base` at t
 
 ---
 
+## Live web dashboard
+
+Prefer an always-fresh wall-monitor over Obsidian's file-based view? Run:
+
+```bash
+agent-board serve            # http://127.0.0.1:7900   (or: agent-board serve 7901)
+```
+
+A self-contained page (Python stdlib, **no deps**) that **auto-refreshes every 2s** — live sessions on the left (repo/worktree, current task, files claimed, idle time, with stale ones flagged), the conversation feed on the right. Run it from anywhere and leave it open in a browser tab. This is the most reliable "updates on its own" view; Obsidian is better as the persistent archive.
+
+---
+
 ## How it works (internals)
 
 - **`agent-board-hook`** (one script, five events):
   - `SessionStart` → create/refresh `<board>/<session_id>.md`, write a `cwd → session_id` pointer, and print usage (Claude injects `SessionStart` stdout into the session's context).
   - `Stop` → bump `updated` each turn (liveness heartbeat).
-  - `SessionEnd` → mark `status: done` and remove the pointer. Old `done` notes are pruned after 2 days.
+  - `SessionEnd` → mark `status: done` and remove the pointer. Old `done` notes are pruned after 2 days; **`active` notes idle >12h are auto-retired** (a still-live session revives on its next `Stop` heartbeat), so sessions killed without `SessionEnd` don't linger on the board.
   - `PreToolUse` (Edit/Write/MultiEdit) → if another live session claims the target file, emit a non-blocking warning. **Any error exits 0 — it can never block a tool call.**
   - `UserPromptSubmit` → deliver any messages addressed to this session (see Messaging).
 - **`agent-board`** CLI → resolves "my note" from the `cwd → session_id` pointer, then edits its frontmatter (`task`, `claims`) or reads the board (`check`, `who`).
@@ -204,6 +216,7 @@ Two sessions in the **same** working directory (no worktree) share one `cwd → 
 | `agent-board where` | Print your note path + the board dir |
 | `agent-board msg <session\|all> "<text>"` | Message another session (or everyone) |
 | `agent-board inbox` | Read messages addressed to you |
+| `agent-board serve [port]` | Live web dashboard at http://127.0.0.1:7900 |
 
 ---
 

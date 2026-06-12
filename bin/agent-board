@@ -13,6 +13,7 @@ so just run it from inside your session's working directory.
   agent-board where                      print your note path + the board dir
   agent-board msg <session|all> "<text>" message another session (or everyone)
   agent-board inbox                      read messages addressed to you
+  agent-board serve [port]               live web dashboard (default http://127.0.0.1:7900)
 
 Config: ~/.config/obsidian-agent-board/config.json  (board_dir, roots).
 Env overrides: AGENT_BOARD_DIR, AGENT_BOARD_ROOTS (colon-separated)."""
@@ -282,9 +283,150 @@ def cmd_inbox(_args):
               f"{m.get('to')}: {m.get('text')}")
 
 
+PAGE = """<!doctype html><html lang="en"><head><meta charset="utf-8">
+<title>Agent Board</title>
+<style>
+ :root{color-scheme:dark}
+ *{box-sizing:border-box}
+ body{margin:0;background:#0d1117;color:#e6edf3;font:14px/1.5 -apple-system,Segoe UI,Roboto,sans-serif}
+ header{padding:13px 20px;border-bottom:1px solid #21262d;display:flex;align-items:center;gap:11px}
+ header h1{font-size:15px;margin:0;font-weight:600}
+ .dot{width:8px;height:8px;border-radius:50%;background:#3fb950;box-shadow:0 0 8px #3fb950}
+ .muted{color:#7d8590;font-size:12px}
+ .wrap{display:grid;grid-template-columns:1.3fr 1fr;height:calc(100vh - 49px)}
+ .col{padding:16px 20px;overflow:auto}
+ .col+.col{border-left:1px solid #21262d}
+ h2{font-size:11px;text-transform:uppercase;letter-spacing:.09em;color:#7d8590;margin:0 0 12px}
+ table{width:100%;border-collapse:collapse}
+ th,td{text-align:left;padding:8px 10px;border-bottom:1px solid #21262d;vertical-align:top}
+ th{font-size:11px;color:#7d8590;text-transform:uppercase;letter-spacing:.05em}
+ .tag{display:inline-block;padding:1px 7px;border-radius:10px;background:#1f6feb22;color:#58a6ff;font-size:12px;font-variant-numeric:tabular-nums}
+ .wt{color:#d29922}
+ .idle{color:#7d8590;font-variant-numeric:tabular-nums;white-space:nowrap}
+ .stale{color:#f85149}
+ .claims{color:#a5d6ff;font-size:12px}
+ .msg{padding:7px 0;border-bottom:1px solid #161b22}
+ .msg .t{color:#6e7681;font-size:11px;margin-right:7px;font-variant-numeric:tabular-nums}
+ .msg .from{color:#58a6ff;font-weight:600}
+ .msg .to{color:#7d8590}
+ .empty{color:#7d8590;font-style:italic;padding:18px 0}
+</style></head><body>
+<header><span class="dot"></span><h1>Agent Board</h1><span class="muted" id="meta"></span></header>
+<div class="wrap">
+ <div class="col"><h2>Live sessions</h2><div id="sessions"></div></div>
+ <div class="col"><h2>Conversations</h2><div id="chat"></div></div>
+</div>
+<script>
+function el(t,c,txt){var e=document.createElement(t);if(c)e.className=c;if(txt!=null)e.textContent=txt;return e;}
+function idleStr(m){return m>=60?(Math.floor(m/60)+'h '+(m%60)+'m'):(m+'m');}
+async function tick(){
+ try{
+  var d=await (await fetch('/data',{cache:'no-store'})).json();
+  document.getElementById('meta').textContent=d.sessions.length+' active \\u00b7 updated '+d.generated;
+  var S=document.getElementById('sessions');S.innerHTML='';
+  if(!d.sessions.length){S.appendChild(el('div','empty','No active sessions.'));}
+  else{
+   var tbl=el('table'),hr=el('tr');['Session','Repo / worktree','Working on','Claims','Idle'].forEach(function(h){hr.appendChild(el('th',null,h));});tbl.appendChild(hr);
+   d.sessions.forEach(function(s){
+    var tr=el('tr'),td=el('td');td.appendChild(el('span','tag',s.session));tr.appendChild(td);
+    var loc=el('td');loc.appendChild(el('span',null,s.repo));loc.appendChild(document.createTextNode(' / '));loc.appendChild(el('span','wt',s.worktree));tr.appendChild(loc);
+    tr.appendChild(el('td',null,s.task||'\\u2014'));
+    tr.appendChild(el('td','claims',(s.claims&&s.claims.length)?s.claims.map(function(c){return c.split('/').pop();}).join(', '):'\\u2014'));
+    tr.appendChild(el('td',s.idle>=720?'idle stale':'idle',idleStr(s.idle)));
+    tbl.appendChild(tr);
+   });
+   S.appendChild(tbl);
+  }
+  var C=document.getElementById('chat');C.innerHTML='';
+  if(!d.messages.length){C.appendChild(el('div','empty','No messages yet \\u2014 agents send with: agent-board msg <session|all> "\\u2026"'));}
+  else{
+   d.messages.forEach(function(m){
+    var div=el('div','msg');
+    div.appendChild(el('span','t',(m.ts||'').slice(11,16)));
+    div.appendChild(el('span','from',m.from_name||m.from||'?'));
+    div.appendChild(el('span','to',' \\u2192 '+(m.to||'?')+': '));
+    div.appendChild(document.createTextNode(m.text||''));
+    C.appendChild(div);
+   });
+   C.scrollTop=C.scrollHeight;
+  }
+ }catch(e){document.getElementById('meta').textContent='disconnected (server stopped?)';}
+}
+tick();setInterval(tick,2000);
+</script></body></html>"""
+
+
+def cmd_serve(args):
+    import http.server
+    import glob as _glob
+    port = int(args[0]) if args and args[0].lstrip("-").isdigit() else 7900
+
+    def snapshot():
+        sessions = []
+        for p in _glob.glob(os.path.join(BOARD, "*.md")):
+            if os.path.basename(p).startswith("_"):
+                continue
+            try:
+                fm, _ = read_note(p)
+            except Exception:
+                continue
+            if fm.get("status") != "active":
+                continue
+            try:
+                idle = int((time.time() - os.path.getmtime(p)) / 60)
+            except Exception:
+                idle = 0
+            sessions.append({"session": fm.get("session", ""), "repo": fm.get("repo", ""),
+                             "worktree": fm.get("worktree", ""), "task": fm.get("task", ""),
+                             "claims": fm.get("claims", []), "idle": idle})
+        sessions.sort(key=lambda s: (s["repo"], s["session"]))
+        msgs = []
+        try:
+            with open(msg_store(BOARD)) as f:
+                for line in f:
+                    line = line.strip()
+                    if line:
+                        try:
+                            msgs.append(json.loads(line))
+                        except Exception:
+                            pass
+        except FileNotFoundError:
+            pass
+        return {"sessions": sessions, "messages": msgs[-60:],
+                "generated": time.strftime("%H:%M:%S")}
+
+    class H(http.server.BaseHTTPRequestHandler):
+        def log_message(self, *a):
+            pass
+
+        def _send(self, body, ctype):
+            self.send_response(200)
+            self.send_header("Content-Type", ctype)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def do_GET(self):
+            if self.path.startswith("/data"):
+                self._send(json.dumps(snapshot()).encode(), "application/json")
+            else:
+                self._send(PAGE.encode(), "text/html; charset=utf-8")
+
+    try:
+        httpd = http.server.ThreadingHTTPServer(("127.0.0.1", port), H)
+    except OSError as e:
+        sys.exit(f"agent-board serve: can't bind port {port} ({e}). Try a different port: agent-board serve 7901")
+    print(f"agent-board dashboard → http://127.0.0.1:{port}   (Ctrl-C to stop)")
+    print(f"board: {BOARD}")
+    try:
+        httpd.serve_forever()
+    except KeyboardInterrupt:
+        print("\\nstopped.")
+
+
 CMDS = {"task": cmd_task, "claim": cmd_claim, "release": cmd_release,
         "note": cmd_note, "check": cmd_check, "who": cmd_who, "where": cmd_where,
-        "msg": cmd_msg, "inbox": cmd_inbox}
+        "msg": cmd_msg, "inbox": cmd_inbox, "serve": cmd_serve}
 
 
 def main():
