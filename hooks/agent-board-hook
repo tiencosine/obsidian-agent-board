@@ -226,7 +226,9 @@ def latest_user_text(path, limit=150):
                     txt = " ".join(c.get("text", "") for c in content
                                    if isinstance(c, dict) and c.get("type") == "text")
                 txt = " ".join(txt.split())
-                if txt and not txt.startswith("<") and not txt.startswith("[SYSTEM"):
+                if (txt and not txt.startswith("<") and not txt.startswith("[SYSTEM")
+                        and not txt.startswith("Base directory for this skill")
+                        and not txt.startswith("Caveat:")):
                     found = txt
         if found and len(found) > limit:
             found = found[:limit].rstrip() + "…"

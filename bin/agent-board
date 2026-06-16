@@ -316,7 +316,7 @@ PAGE = """<!doctype html><html lang="en"><head><meta charset="utf-8">
  .pill.live .pip{width:7px;height:7px;border-radius:50%;background:var(--accent);box-shadow:0 0 10px var(--accent);animation:pulse 1.7s infinite}
  #clock{font-family:var(--mono);color:var(--dim);font-size:12.5px;font-variant-numeric:tabular-nums;min-width:62px;text-align:right}
  .grid{flex:1;display:grid;grid-template-columns:1.6fr 1fr;min-height:0}
- .panel{display:flex;flex-direction:column;min-height:0;animation:rise .6s .08s cubic-bezier(.2,.8,.2,1) both}
+ .panel{display:flex;flex-direction:column;min-width:0;min-height:0;animation:rise .6s .08s cubic-bezier(.2,.8,.2,1) both}
  .panel.right{background:linear-gradient(180deg,rgba(122,162,255,.022),transparent);border-left:1px solid var(--line)}
  .phead{display:flex;align-items:center;gap:9px;padding:16px 24px 12px}
  .phead .ic{color:var(--accent);font-size:9px}
