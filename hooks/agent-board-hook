@@ -337,10 +337,28 @@ def handle(payload):
             fm, body = read_note(note)
             fm["status"] = "active"
             fm["updated"] = now_iso()
-            act = latest_user_text(transcript)
-            if act:
-                fm["activity"] = act
-            write_note(note, fm, body)
+        else:
+            # Session that missed SessionStart (e.g. started before the hook was
+            # installed). Onboard it now so EVERY active session shows on the board.
+            fm = {
+                "status": "active",
+                "session": sid[:8],
+                "session_id": sid,
+                "repo": derive_repo(cwd),
+                "worktree": derive_worktree(cwd),
+                "branch": git(cwd, "rev-parse", "--abbrev-ref", "HEAD"),
+                "task": "(starting…)",
+                "claims": [],
+                "started": now_iso(),
+                "updated": now_iso(),
+            }
+            body = ""
+            with open(pointer_path(cwd), "w") as f:
+                f.write(sid)
+        act = latest_user_text(transcript)
+        if act:
+            fm["activity"] = act
+        write_note(note, fm, body)
     elif event == "SessionEnd":
         if os.path.exists(note):
             fm, body = read_note(note)
