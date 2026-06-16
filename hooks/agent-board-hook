@@ -18,7 +18,7 @@ CFG_DIR = os.path.expanduser("~/.config/obsidian-agent-board")
 POINTER_DIR = os.path.join(CFG_DIR, "pointers")
 CURSOR_DIR = os.path.join(CFG_DIR, "inbox")
 ORDER = ["status", "session", "session_id", "repo", "worktree", "branch",
-         "task", "claims", "started", "updated"]
+         "task", "activity", "claims", "started", "updated"]
 
 
 def load_config():
@@ -102,7 +102,7 @@ def read_note(path):
             if k == "claims":
                 try: fm[k] = json.loads(v)
                 except Exception: fm[k] = []
-            elif k == "task":
+            elif k in ("task", "activity"):
                 try: fm[k] = json.loads(v)
                 except Exception: fm[k] = v
             else:
@@ -121,7 +121,7 @@ def write_note(path, fm, body=""):
         v = fm[k]
         if k == "claims":
             v = json.dumps(v, ensure_ascii=False)
-        elif k == "task":
+        elif k in ("task", "activity"):
             v = json.dumps(v if v else "", ensure_ascii=False)
         lines.append(f"{k}: {v}")
     out = "\n".join(lines) + "\n---\n" + (body or "")
@@ -200,10 +200,46 @@ def deliver_for(board, sid, sid_name):
     return mine
 
 
+def latest_user_text(path, limit=150):
+    """Best-effort: the most recent real user message from the session transcript,
+    so the board reflects what a session is doing without the agent reporting it."""
+    if not path:
+        return None
+    try:
+        found = None
+        with open(path) as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    ev = json.loads(line)
+                except Exception:
+                    continue
+                if ev.get("type") != "user":
+                    continue
+                content = (ev.get("message") or {}).get("content")
+                txt = ""
+                if isinstance(content, str):
+                    txt = content
+                elif isinstance(content, list):
+                    txt = " ".join(c.get("text", "") for c in content
+                                   if isinstance(c, dict) and c.get("type") == "text")
+                txt = " ".join(txt.split())
+                if txt and not txt.startswith("<") and not txt.startswith("[SYSTEM"):
+                    found = txt
+        if found and len(found) > limit:
+            found = found[:limit].rstrip() + "…"
+        return found
+    except Exception:
+        return None
+
+
 def handle(payload):
     event = payload.get("hook_event_name", "")
     sid = payload.get("session_id", "")
     cwd = payload.get("cwd", os.getcwd())
+    transcript = payload.get("transcript_path", "")
     board, roots = load_config()
     if not in_scope(cwd, roots):
         return
@@ -279,6 +315,9 @@ def handle(payload):
                 "updated": now_iso(),
             }
             body = ""
+        act = latest_user_text(transcript)
+        if act:
+            fm["activity"] = act
         write_note(note, fm, body)
         with open(pointer_path(cwd), "w") as f:
             f.write(sid)
@@ -296,6 +335,9 @@ def handle(payload):
             fm, body = read_note(note)
             fm["status"] = "active"
             fm["updated"] = now_iso()
+            act = latest_user_text(transcript)
+            if act:
+                fm["activity"] = act
             write_note(note, fm, body)
     elif event == "SessionEnd":
         if os.path.exists(note):

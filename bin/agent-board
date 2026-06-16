@@ -23,7 +23,7 @@ CFG_DIR = os.path.expanduser("~/.config/obsidian-agent-board")
 POINTER_DIR = os.path.join(CFG_DIR, "pointers")
 CURSOR_DIR = os.path.join(CFG_DIR, "inbox")
 ORDER = ["status", "session", "session_id", "repo", "worktree", "branch",
-         "task", "claims", "started", "updated"]
+         "task", "activity", "claims", "started", "updated"]
 
 
 def load_config():
@@ -61,7 +61,7 @@ def read_note(path):
             if k == "claims":
                 try: fm[k] = json.loads(v)
                 except Exception: fm[k] = []
-            elif k == "task":
+            elif k in ("task", "activity"):
                 try: fm[k] = json.loads(v)
                 except Exception: fm[k] = v
             else:
@@ -80,7 +80,7 @@ def write_note(path, fm, body=""):
         v = fm[k]
         if k == "claims":
             v = json.dumps(v, ensure_ascii=False)
-        elif k == "task":
+        elif k in ("task", "activity"):
             v = json.dumps(v if v else "", ensure_ascii=False)
         lines.append(f"{k}: {v}")
     out = "\n".join(lines) + "\n---\n" + (body or "")
@@ -394,8 +394,9 @@ function renderSessions(list){
   var loc=el('span','loc');loc.appendChild(document.createTextNode(s.repo+' / '));loc.appendChild(el('span','wt',s.worktree));row.appendChild(loc);
   row.appendChild(el('span','idle',idleStr(s.idle)));
   card.appendChild(row);
-  var blank=(!s.task||s.task==='(starting…)');
-  card.appendChild(el('div','task'+(blank?' none':''),s.task||'—'));
+  var real=(s.task&&s.task!=='(starting…)');
+  var shown=real?s.task:(s.activity||s.task||'—');
+  card.appendChild(el('div','task'+((!real&&!s.activity)?' none':''),shown));
   if(s.claims&&s.claims.length){var cc=el('div','claims');s.claims.forEach(function(c){cc.appendChild(el('span','chip',base(c)));});card.appendChild(cc);}
   root.appendChild(card);
  });
@@ -451,6 +452,7 @@ def cmd_serve(args):
                 idle = 0
             sessions.append({"session": fm.get("session", ""), "repo": fm.get("repo", ""),
                              "worktree": fm.get("worktree", ""), "task": fm.get("task", ""),
+                             "activity": fm.get("activity", ""),
                              "claims": fm.get("claims", []), "idle": idle})
         sessions.sort(key=lambda s: (s["repo"], s["session"]))
         msgs = []
